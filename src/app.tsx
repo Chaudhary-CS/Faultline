@@ -242,6 +242,17 @@ export function App({ navigate = (p: string) => { window.location.href = p; } }:
   const [showSubscribeForm, setShowSubscribeForm] = useState(false);
   const [digestEmail, setDigestEmail] = useState("");
 
+  // First-visit intro card — shown once, 2s after load
+  const [showIntroCard, setShowIntroCard] = useState(false);
+  useEffect(() => {
+    if (localStorage.getItem("faultline-intro-seen")) return;
+    const t = setTimeout(() => {
+      setShowIntroCard(true);
+      localStorage.setItem("faultline-intro-seen", "1");
+    }, 2000);
+    return () => clearTimeout(t);
+  }, []);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -424,6 +435,20 @@ export function App({ navigate = (p: string) => { window.location.href = p; } }:
 
       {toast && <div className="toast">{toast}</div>}
 
+      {/* First-visit intro card */}
+      {showIntroCard && (
+        <div className="intro-card" role="status">
+          <button className="intro-close" onClick={() => setShowIntroCard(false)} aria-label="Dismiss">✕</button>
+          <div className="intro-dot" />
+          <p className="intro-text">
+            Built in <strong>3hrs</strong> on Cloudflare Workers by <strong>Kartik Chaudhary</strong>
+          </p>
+          <button className="intro-link" onClick={() => { setShowIntroCard(false); navigate("/about"); }}>
+            Meet the builder →
+          </button>
+        </div>
+      )}
+
       {/* ── Watchlist panel ────────────────────────────────────────── */}
       {showWatchlistPanel && (
         <div className="watchlist-overlay" onClick={() => setShowWatchlistPanel(false)}>
@@ -586,6 +611,13 @@ export function App({ navigate = (p: string) => { window.location.href = p; } }:
                   <button key={q} className="suggestion-chip" onClick={() => handleSend(q)}>{q}</button>
                 ))}
               </div>
+
+              {/* Builder attribution */}
+              <button className="builder-credit" onClick={() => navigate("/about")}>
+                <span className="builder-credit-dot" />
+                <span>Shipped by <strong>Kartik Chaudhary</strong> on Cloudflare</span>
+                <span className="builder-credit-arrow">→</span>
+              </button>
             </div>
           ) : (
             <div className="messages">

@@ -1087,6 +1087,113 @@ html, body {
   /* text parts sit naturally in the bubble flow */
 }
 
+/* ── First-visit intro card ───────────────────────────────────── */
+.intro-card {
+  position: fixed;
+  bottom: 28px;
+  right: 24px;
+  z-index: 150;
+  background: #111111;
+  border: 1px solid var(--orange);
+  border-radius: 10px;
+  padding: 14px 16px 12px;
+  max-width: 260px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6), 0 0 0 1px rgba(246,130,31,0.1);
+  animation: introSlideIn 0.3s cubic-bezier(0.16,1,0.3,1);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+@keyframes introSlideIn {
+  from { opacity: 0; transform: translateY(16px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.intro-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  transition: color 0.1s;
+}
+.intro-close:hover { color: var(--text-muted); }
+
+.intro-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--orange);
+  animation: pulse-orange 2s ease-in-out infinite;
+}
+
+.intro-text {
+  font-size: 12px;
+  color: #a1a1aa;
+  line-height: 1.5;
+  padding-right: 16px;
+}
+.intro-text strong { color: var(--text); }
+
+.intro-link {
+  background: none;
+  border: none;
+  color: var(--orange);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 0;
+  text-align: left;
+  transition: opacity 0.15s;
+}
+.intro-link:hover { opacity: 0.8; }
+
+/* ── Builder credit in empty state ───────────────────────────── */
+.builder-credit {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 6px 10px;
+  border-radius: 20px;
+  border: 1px solid transparent;
+  transition: all 0.15s ease;
+  margin-top: 8px;
+}
+.builder-credit:hover {
+  color: #a1a1aa;
+  border-color: rgba(246,130,31,0.2);
+  background: var(--orange-glow);
+}
+.builder-credit strong { color: var(--orange); font-weight: 600; }
+
+.builder-credit-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--orange);
+  flex-shrink: 0;
+  animation: pulse-orange 2s ease-in-out infinite;
+}
+
+.builder-credit-arrow {
+  color: var(--orange);
+  font-size: 11px;
+  margin-left: 2px;
+}
+
 /* ── Footer badge ─────────────────────────────────────────────── */
 .footer-badge-wrap {
   display: flex;
@@ -1098,7 +1205,7 @@ html, body {
   background: none;
   border: none;
   font-size: 11px;
-  color: var(--text-dim);
+  color: #71717a;
   cursor: pointer;
   font-family: inherit;
   padding: 4px 8px;
@@ -1106,7 +1213,7 @@ html, body {
   transition: color 0.15s ease;
   text-align: center;
 }
-.footer-badge-line:hover { color: #a1a1aa; }
+.footer-badge-line:hover { color: #d4d4d8; }
 .footer-badge-line-hidden { display: none; }
 
 .footer-badge-cta {
