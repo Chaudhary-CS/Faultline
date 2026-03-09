@@ -242,16 +242,6 @@ export function App({ navigate = (p: string) => { window.location.href = p; } }:
   const [showSubscribeForm, setShowSubscribeForm] = useState(false);
   const [digestEmail, setDigestEmail] = useState("");
 
-  // First-visit intro card — shown once, 2s after load
-  const [showIntroCard, setShowIntroCard] = useState(false);
-  useEffect(() => {
-    if (localStorage.getItem("faultline-intro-seen")) return;
-    const t = setTimeout(() => {
-      setShowIntroCard(true);
-      localStorage.setItem("faultline-intro-seen", "1");
-    }, 2000);
-    return () => clearTimeout(t);
-  }, []);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -435,19 +425,14 @@ export function App({ navigate = (p: string) => { window.location.href = p; } }:
 
       {toast && <div className="toast">{toast}</div>}
 
-      {/* First-visit intro card */}
-      {showIntroCard && (
-        <div className="intro-card" role="status">
-          <button className="intro-close" onClick={() => setShowIntroCard(false)} aria-label="Dismiss">✕</button>
-          <div className="intro-dot" />
-          <p className="intro-text">
-            Built in <strong>3hrs</strong> on Cloudflare Workers by <strong>Kartik Chaudhary</strong>
-          </p>
-          <button className="intro-link" onClick={() => { setShowIntroCard(false); navigate("/about"); }}>
-            Meet the builder →
-          </button>
-        </div>
-      )}
+      {/* Persistent "Meet the builder" floating badge — always visible */}
+      <button className="meet-builder-badge" onClick={() => navigate("/about")} aria-label="Meet the builder">
+        <span className="meet-builder-dot" />
+        <span className="meet-builder-text">
+          <span className="meet-builder-main">Kartik Chaudhary</span>
+          <span className="meet-builder-sub">Built in 3hrs on Cloudflare →</span>
+        </span>
+      </button>
 
       {/* ── Watchlist panel ────────────────────────────────────────── */}
       {showWatchlistPanel && (
@@ -543,8 +528,8 @@ export function App({ navigate = (p: string) => { window.location.href = p; } }:
             </button>
 
             {/* About link */}
-            <button className="new-chat-btn" onClick={() => navigate("/about")} aria-label="About">
-              About
+            <button className="about-header-btn" onClick={() => navigate("/about")} aria-label="Meet the builder">
+              👤 About me
             </button>
 
             {visibleMessages.length > 0 && (
