@@ -1,0 +1,25 @@
+{
+  "name": "faultline",
+  "version": "1.0.0",
+  "description": "AI-powered internet outage storyteller built on Cloudflare's stack",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev --port 5173",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@cloudflare/agents": "latest",
+    "hono": "latest",
+    "zod": "latest",
+    "react": "^18",
+    "react-dom": "^18"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "latest",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "typescript": "^5",
+    "wrangler": "latest"
+  }
+}

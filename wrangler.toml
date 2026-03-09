@@ -1,0 +1,27 @@
+name = "faultline"
+main = "src/server.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# I'm using Pages-style asset serving through Workers Assets
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# Workers AI binding — this is what talks to Llama 3.3
+[ai]
+binding = "AI"
+
+# Durable Objects for persistent chat sessions
+[[durable_objects.bindings]]
+name = "CHAT_AGENT"
+class_name = "ChatAgent"
+
+# DO migration — required first time you create a new DO class
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatAgent"]
+
+# Radar API token — set via: npx wrangler secret put CLOUDFLARE_RADAR_TOKEN
+[vars]
+NODE_ENV = "production"
