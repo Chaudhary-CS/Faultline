@@ -557,6 +557,89 @@ html, body {
   50% { opacity: 0.8; }
 }
 
+/* ── New Chat button ──────────────────────────────────────────── */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.new-chat-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+
+.new-chat-btn:hover {
+  border-color: var(--orange);
+  color: var(--orange);
+  background: var(--orange-glow);
+}
+
+/* ── Copy button ──────────────────────────────────────────────── */
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+
+.copy-btn:hover {
+  color: var(--text-muted);
+  border-color: #333;
+  background: var(--surface-2);
+}
+
+/* ── Follow-up suggestion chips ───────────────────────────────── */
+.followup-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-left: 2px;
+  margin-top: -4px;
+  margin-bottom: 4px;
+  animation: fadeIn 0.3s ease;
+}
+
+.followup-chip {
+  padding: 5px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(246,130,31,0.25);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+
+.followup-chip:hover {
+  border-color: var(--orange);
+  color: var(--orange);
+  background: var(--orange-glow);
+}
+
 /* ── Tool completion badge ────────────────────────────────────── */
 /* Shows up inline in agent message when a Radar tool finishes */
 .tool-badge {

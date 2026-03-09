@@ -1,6 +1,5 @@
-// Main chat UI — built to look like Cloudflare's own dashboard.
-// useAgent handles the WebSocket to the DO, useAgentChat wraps the
-// AI SDK v6 chat interface on top of it.
+// Main chat UI — Cloudflare aesthetic, dark + orange.
+// New features: New Chat, Copy response, Follow-up suggestions, auto-refresh metrics.
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useAgent } from "agents/react";
@@ -13,16 +12,25 @@ const SUGGESTED_QUERIES = [
   "Internet health status",
 ];
 
-// Maps tool names to what the UI shows in the "Querying Radar..." bar
-const TOOL_LABELS: Record<string, string> = {
-  getCurrentOutages: "Fetching current outages",
-  getBGPHijacks: "Scanning BGP hijack events",
-  getRouteLeaks: "Checking route leak events",
-  getTrafficAnomalies: "Analyzing traffic anomalies",
-  getInternetHealth: "Pulling global routing stats",
-};
+// Follow-up suggestions shown after each agent response — I pick these
+// based on what the last agent message was about
+function getFollowUps(lastAgentText: string): string[] {
+  const t = lastAgentText.toLowerCase();
+  if (t.includes("hijack") || t.includes("bgp")) {
+    return ["Show route leaks too", "Which ASNs are most affected?", "Is this unusual activity?"];
+  }
+  if (t.includes("outage") || t.includes("broken") || t.includes("disruption")) {
+    return ["Which regions are affected?", "Any BGP issues related?", "How long do these usually last?"];
+  }
+  if (t.includes("health") || t.includes("routing table") || t.includes("prefix")) {
+    return ["Are there any active outages?", "Show BGP hijack events", "Traffic anomalies today"];
+  }
+  if (t.includes("traffic") || t.includes("anomal")) {
+    return ["Show BGP hijacks", "Any outages in those regions?", "Internet health status"];
+  }
+  return ["Any BGP hijacks today?", "Show recent outages", "Global internet health"];
+}
 
-// Persist session ID in localStorage so each tab has its own chat history
 function getSessionId(): string {
   let id = localStorage.getItem("faultline-session");
   if (!id) {
@@ -32,103 +40,87 @@ function getSessionId(): string {
   return id;
 }
 
-// Pull status bar metrics on load — two Radar endpoints in parallel
-// Falls back gracefully if either fails (e.g. token not set yet)
+function newSessionId(): string {
+  const id = `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  localStorage.setItem("faultline-session", id);
+  return id;
+}
+
 async function fetchStatusMetrics() {
   try {
     const [routeRes, outageRes] = await Promise.allSettled([
       fetch("/api/radar/route-stats"),
       fetch("/api/radar/outages"),
     ]);
-
     let totalRoutes = "—";
     let activeOutages = "—";
-
     if (routeRes.status === "fulfilled" && routeRes.value.ok) {
       const d = (await routeRes.value.json()) as {
         result?: { meta?: { totalIPv4RoutesAdvertised?: number } };
       };
-      totalRoutes =
-        d?.result?.meta?.totalIPv4RoutesAdvertised?.toLocaleString() ?? "—";
+      totalRoutes = d?.result?.meta?.totalIPv4RoutesAdvertised?.toLocaleString() ?? "—";
     }
     if (outageRes.status === "fulfilled" && outageRes.value.ok) {
       const d = (await outageRes.value.json()) as {
         result?: { annotations?: { outages?: unknown[] } };
       };
-      activeOutages = String(
-        d?.result?.annotations?.outages?.length ?? "—"
-      );
+      activeOutages = String(d?.result?.annotations?.outages?.length ?? "—");
     }
-
-    return {
-      totalRoutes,
-      activeOutages,
-      lastUpdated: new Date().toLocaleTimeString(),
-    };
+    return { totalRoutes, activeOutages, lastUpdated: new Date().toLocaleTimeString() };
   } catch {
-    return {
-      totalRoutes: "—",
-      activeOutages: "—",
-      lastUpdated: new Date().toLocaleTimeString(),
-    };
+    return { totalRoutes: "—", activeOutages: "—", lastUpdated: new Date().toLocaleTimeString() };
   }
 }
 
+// Extract plain text from all text parts of a message
+function extractText(parts: MessagePart[]): string {
+  return parts
+    .filter((p) => p.type === "text")
+    .map((p) => (p as { type: "text"; text: string }).text)
+    .join("\n");
+}
+
 export function App() {
-  const sessionId = useRef(getSessionId());
+  const [sessionId, setSessionId] = useState(getSessionId);
   const [input, setInput] = useState("");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [metrics, setMetrics] = useState({
-    totalRoutes: "—",
-    activeOutages: "—",
-    lastUpdated: "—",
-    loaded: false,
+    totalRoutes: "—", activeOutages: "—", lastUpdated: "—", loaded: false,
   });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // useAgent opens a WebSocket to /agents/ChatAgent/{sessionId} on the Worker.
-  // routeAgentRequest on the server side routes it to the right DO instance.
-  const agent = useAgent({
-    agent: "ChatAgent",
-    name: sessionId.current,
-  });
-
-  // useAgentChat wraps AI SDK v6's useChat with the agent WebSocket transport.
-  // messages, status, sendMessage are the main things I use from this.
-  const { messages, sendMessage, status } = useAgentChat({ agent });
+  const agent = useAgent({ agent: "ChatAgent", name: sessionId });
+  const { messages, sendMessage, status, clearHistory } = useAgentChat({ agent });
 
   const isLoading = status === "submitted" || status === "streaming";
+  const isConnected = status !== "error";
 
-  // Show "Querying Radar..." while the agent is loading — the pre-fetch
-  // happens server-side before streaming starts, so we just show it while
-  // the response is in the submitted/streaming state
-  const activeTools = React.useMemo(() => {
-    if (!isLoading) return new Set<string>();
-    return new Set(["radar"]);
-  }, [isLoading]);
+  // Show Radar indicator while loading
+  const showRadarBadge = isLoading;
 
+  // Refresh metrics on load and every 60 seconds
   useEffect(() => {
-    fetchStatusMetrics().then((m) => setMetrics({ ...m, loaded: true }));
+    const load = () => fetchStatusMetrics().then((m) => setMetrics({ ...m, loaded: true }));
+    load();
+    const interval = setInterval(load, 60_000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
-  const handleSend = useCallback(() => {
-    const text = input.trim();
-    if (!text || isLoading) return;
-    sendMessage({ text });
+  const handleSend = useCallback((text?: string) => {
+    const t = (text ?? input).trim();
+    if (!t || isLoading) return;
+    sendMessage({ text: t });
     setInput("");
-    // Reset textarea height
     if (inputRef.current) inputRef.current.style.height = "auto";
   }, [input, isLoading, sendMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -137,14 +129,36 @@ export function App() {
     e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
   };
 
-  const isConnected = status !== "error";
+  // New chat: clear history + generate a fresh session ID so we get a clean DO
+  const handleNewChat = useCallback(() => {
+    clearHistory();
+    setSessionId(newSessionId());
+    setInput("");
+  }, [clearHistory]);
+
+  // Copy agent message text to clipboard
+  const handleCopy = useCallback((id: string, text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    });
+  }, []);
+
+  // The last completed agent message (for follow-up suggestions)
+  const lastAgentMsg = !isLoading
+    ? [...messages].reverse().find((m) => m.role === "assistant")
+    : null;
+
+  const followUps = lastAgentMsg
+    ? getFollowUps(extractText(lastAgentMsg.parts as MessagePart[]))
+    : null;
 
   return (
     <div className="app">
       <div className="grid-bg" aria-hidden="true" />
-
       <div className="container">
-        {/* ── Header ─────────────────────────────────────── */}
+
+        {/* ── Header ──────────────────────────────────── */}
         <header className="header">
           <div className="logo">
             <svg className="logo-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -154,28 +168,36 @@ export function App() {
               <path d="M12 12 L18 6" stroke="#f6821f" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
             <div>
-              <h1 className="logo-title">
-                Fault<span className="logo-accent">line</span>
-              </h1>
+              <h1 className="logo-title">Fault<span className="logo-accent">line</span></h1>
               <p className="logo-sub">Powered by Cloudflare Radar + Workers AI</p>
             </div>
           </div>
 
-          <div className={`status-badge ${isConnected ? "connected" : "connecting"}`}>
-            <span className="status-dot" />
-            <span>{isConnected ? "Live" : "Connecting..."}</span>
+          <div className="header-actions">
+            {messages.length > 0 && (
+              <button className="new-chat-btn" onClick={handleNewChat} aria-label="Start new chat">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                </svg>
+                New Chat
+              </button>
+            )}
+            <div className={`status-badge ${isConnected ? "connected" : "connecting"}`}>
+              <span className="status-dot" />
+              <span>{isConnected ? "Live" : "Connecting..."}</span>
+            </div>
           </div>
         </header>
 
-        {/* ── Tool call indicator ─────────────────────────── */}
-        {activeTools.size > 0 && (
+        {/* ── Radar indicator ──────────────────────────── */}
+        {showRadarBadge && (
           <div className="tool-indicator">
             <div className="tool-pulse" aria-hidden="true" />
             <span>Querying Cloudflare Radar...</span>
           </div>
         )}
 
-        {/* ── Chat area ───────────────────────────────────── */}
+        {/* ── Chat area ────────────────────────────────── */}
         <main className="chat-area">
           {messages.length === 0 && !isLoading ? (
             <div className="empty-state">
@@ -192,46 +214,76 @@ export function App() {
               </div>
               <h2 className="empty-title">Find where the internet breaks</h2>
               <p className="empty-sub">
-                Ask me about outages, BGP hijacks, route leaks, or traffic
-                anomalies. I pull live data from Cloudflare Radar and explain
-                it in plain English.
+                Ask me about outages, BGP hijacks, route leaks, or traffic anomalies.
+                I pull live data from Cloudflare Radar and explain it in plain English.
               </p>
               <div className="suggestions">
                 {SUGGESTED_QUERIES.map((q) => (
-                  <button
-                    key={q}
-                    className="suggestion-chip"
-                    onClick={() => sendMessage({ text: q })}
-                  >
-                    {q}
-                  </button>
+                  <button key={q} className="suggestion-chip" onClick={() => handleSend(q)}>{q}</button>
                 ))}
               </div>
             </div>
           ) : (
             <div className="messages">
-              {messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`message ${msg.role === "user" ? "message-user" : "message-agent"}`}
-                >
-                  {msg.role === "assistant" && (
-                    <div className="agent-label">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <circle cx="12" cy="12" r="10" stroke="#f6821f" strokeWidth="2" strokeDasharray="2 3" />
-                        <circle cx="12" cy="12" r="2.5" fill="#f6821f" />
-                      </svg>
-                      <span>Faultline</span>
-                    </div>
-                  )}
-                  <div className="message-bubble">
-                    {renderParts(msg.parts as MessagePart[])}
-                  </div>
-                </div>
-              ))}
+              {messages.map((msg, idx) => {
+                const isLast = idx === messages.length - 1;
+                const parts = msg.parts as MessagePart[];
+                const plainText = extractText(parts);
 
-              {/* Blinking cursor while streaming but no tool is active */}
-              {isLoading && activeTools.size === 0 && (
+                return (
+                  <React.Fragment key={msg.id}>
+                    <div className={`message ${msg.role === "user" ? "message-user" : "message-agent"}`}>
+                      {msg.role === "assistant" && (
+                        <div className="agent-label">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <circle cx="12" cy="12" r="10" stroke="#f6821f" strokeWidth="2" strokeDasharray="2 3" />
+                            <circle cx="12" cy="12" r="2.5" fill="#f6821f" />
+                          </svg>
+                          <span>Faultline</span>
+                        </div>
+                      )}
+                      <div className="message-bubble">
+                        {renderParts(parts)}
+                      </div>
+
+                      {/* Copy button on agent messages */}
+                      {msg.role === "assistant" && plainText && (
+                        <button
+                          className="copy-btn"
+                          onClick={() => handleCopy(msg.id, plainText)}
+                          aria-label="Copy response"
+                          title="Copy to clipboard"
+                        >
+                          {copiedId === msg.id ? (
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                              <path d="M20 6L9 17L4 12" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          ) : (
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                              <rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" strokeWidth="2" />
+                              <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" stroke="currentColor" strokeWidth="2" />
+                            </svg>
+                          )}
+                          <span>{copiedId === msg.id ? "Copied!" : "Copy"}</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Follow-up suggestions after the last agent message */}
+                    {msg.role === "assistant" && isLast && !isLoading && followUps && (
+                      <div className="followup-row">
+                        {followUps.map((q) => (
+                          <button key={q} className="followup-chip" onClick={() => handleSend(q)}>
+                            {q}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+
+              {isLoading && (
                 <div className="message message-agent">
                   <div className="agent-label">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -251,7 +303,7 @@ export function App() {
           )}
         </main>
 
-        {/* ── Input ───────────────────────────────────────── */}
+        {/* ── Input ────────────────────────────────────── */}
         <footer className="input-area">
           <div className="input-wrapper">
             <textarea
@@ -266,7 +318,7 @@ export function App() {
             />
             <button
               className="send-btn"
-              onClick={handleSend}
+              onClick={() => handleSend()}
               disabled={!input.trim() || isLoading}
               aria-label="Send message"
             >
@@ -281,7 +333,7 @@ export function App() {
           </p>
         </footer>
 
-        {/* ── Status bar ──────────────────────────────────── */}
+        {/* ── Status bar ───────────────────────────────── */}
         <div className="status-bar">
           <div className="metric-card">
             <span className="metric-label">Global BGP Routes</span>
@@ -309,7 +361,7 @@ export function App() {
   );
 }
 
-// ── Message rendering ──────────────────────────────────────────────────────
+// ── Message rendering ────────────────────────────────────────────────────────
 
 type MessagePart =
   | { type: "text"; text: string }
@@ -317,8 +369,6 @@ type MessagePart =
   | { type: "reasoning"; reasoning: string }
   | { type: string; toolName?: string; state?: string; toolCallId?: string };
 
-// Render all parts of a message — text gets formatted, tool calls get a
-// subtle "used tool X" badge so the user can see what data was fetched
 function renderParts(parts: MessagePart[]): React.ReactNode {
   return parts.map((part, i) => {
     if (part.type === "text") {
@@ -328,42 +378,12 @@ function renderParts(parts: MessagePart[]): React.ReactNode {
         </div>
       );
     }
-
-    if (part.type === "step-start") {
-      return null; // internal SDK part, nothing to show
-    }
-
-    if (part.type === "reasoning") {
-      return null; // skip reasoning traces in the UI
-    }
-
-    // Any tool part (dynamic-tool or tool-{name}) that completed
-    if (
-      part.type === "dynamic-tool" ||
-      part.type.startsWith("tool-")
-    ) {
-      const p = part as { type: string; toolName?: string; state?: string };
-      const name = p.toolName ?? part.type.replace(/^tool-/, "");
-      const state = p.state ?? "";
-      if (state === "output-available") {
-        return (
-          <div key={i} className="tool-badge">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M20 6L9 17L4 12" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            <span>{TOOL_LABELS[name] ?? name}</span>
-          </div>
-        );
-      }
-      return null;
-    }
-
+    if (part.type === "step-start" || part.type === "reasoning") return null;
+    if (part.type === "dynamic-tool" || part.type.startsWith("tool-")) return null;
     return null;
   });
 }
 
-// Simple text formatter — handles bullet points, bold, inline code,
-// headings, numbered lists. No markdown library needed for this.
 function renderFormattedText(text: string): React.ReactNode {
   const lines = text.split("\n");
   return lines.map((line, i) => {
