@@ -3,26 +3,31 @@
   "version": "1.0.0",
   "description": "AI-powered internet outage storyteller built on Cloudflare's stack",
   "private": true,
+  "type": "module",
   "scripts": {
-    "dev": "wrangler dev --port 5173",
-    "deploy": "wrangler deploy",
+    "dev": "vite",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "agents": "latest",
     "@cloudflare/ai-chat": "latest",
-    "workers-ai-provider": "latest",
+    "agents": "latest",
     "ai": "latest",
     "hono": "latest",
-    "zod": "latest",
     "react": "^19",
-    "react-dom": "^19"
+    "react-dom": "^19",
+    "workers-ai-provider": "latest",
+    "zod": "latest"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.26.1",
     "@cloudflare/workers-types": "latest",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^5.1.4",
     "typescript": "^5",
+    "vite": "^7.3.1",
     "wrangler": "latest"
   }
 }
