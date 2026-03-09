@@ -33,7 +33,8 @@ NODE_ENV = "production"
 [triggers]
 crons = ["0 9 * * *"]
 
-# Static assets served via Vite build
+# Static assets — SPA mode so /about returns index.html on direct access
 [assets]
 directory = "./dist/client"
 binding = "ASSETS"
+not_found_handling = "single-page-application"

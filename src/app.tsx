@@ -5,6 +5,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { FooterBadge } from "./footer-badge";
 
 // ── Suggested query chips ────────────────────────────────────────────────────
 
@@ -219,7 +220,7 @@ function getFollowUps(text: string): string[] {
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
-export function App() {
+export function App({ navigate = (p: string) => { window.location.href = p; } }: { navigate?: (path: string) => void }) {
   const [sessionId, setSessionId] = useState(getSessionId);
   const [input, setInput] = useState("");
   const [hasStarted, setHasStarted] = useState(false);
@@ -516,6 +517,11 @@ export function App() {
               Watchlist
             </button>
 
+            {/* About link */}
+            <button className="new-chat-btn" onClick={() => navigate("/about")} aria-label="About">
+              About
+            </button>
+
             {visibleMessages.length > 0 && (
               <button className="new-chat-btn" onClick={handleNewChat} aria-label="New chat">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -798,6 +804,9 @@ export function App() {
             </span>
           </div>
         </div>
+
+        {/* ── Footer badge ─────────────────────────────────────────────── */}
+        <FooterBadge onCopyEmail={showToast} />
 
       </div>
     </div>
