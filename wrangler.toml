@@ -14,7 +14,7 @@ binding = "AI"
 
 # Durable Objects for persistent chat sessions
 [[durable_objects.bindings]]
-name = "CHAT_AGENT"
+name = "ChatAgent"
 class_name = "ChatAgent"
 
 # DO migration — required first time you create a new DO class

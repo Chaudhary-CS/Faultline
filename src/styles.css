@@ -557,6 +557,29 @@ html, body {
   50% { opacity: 0.8; }
 }
 
+/* ── Tool completion badge ────────────────────────────────────── */
+/* Shows up inline in agent message when a Radar tool finishes */
+.tool-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  margin: 4px 0;
+}
+
+.tool-badge svg {
+  color: var(--green);
+}
+
+.part-text {
+  /* text parts sit naturally in the bubble flow */
+}
+
 /* ── Responsive ───────────────────────────────────────────────── */
 @media (max-width: 600px) {
   .container {

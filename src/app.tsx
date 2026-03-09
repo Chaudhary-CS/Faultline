@@ -1,10 +1,11 @@
-// Main chat UI — I wanted this to feel like Cloudflare's actual dashboard,
-// not just another generic chat box. Dark, minimal, orange accents everywhere.
+// Main chat UI — built to look like Cloudflare's own dashboard.
+// useAgent handles the WebSocket to the DO, useAgentChat wraps the
+// AI SDK v6 chat interface on top of it.
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { useAgentChat } from "@cloudflare/agents/react";
+import { useAgent } from "agents/react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 
-// Suggested queries shown when chat is empty — makes it obvious what the agent can do
 const SUGGESTED_QUERIES = [
   "What's broken right now?",
   "Recent BGP hijacks",
@@ -12,7 +13,7 @@ const SUGGESTED_QUERIES = [
   "Internet health status",
 ];
 
-// Tool name → human-readable label for the "Querying Radar..." indicator
+// Maps tool names to what the UI shows in the "Querying Radar..." bar
 const TOOL_LABELS: Record<string, string> = {
   getCurrentOutages: "Fetching current outages",
   getBGPHijacks: "Scanning BGP hijack events",
@@ -21,72 +22,62 @@ const TOOL_LABELS: Record<string, string> = {
   getInternetHealth: "Pulling global routing stats",
 };
 
-interface StatusMetrics {
-  totalRoutes: string;
-  activeOutages: string;
-  lastUpdated: string;
-  loaded: boolean;
+// Persist session ID in localStorage so each tab has its own chat history
+function getSessionId(): string {
+  let id = localStorage.getItem("faultline-session");
+  if (!id) {
+    id = `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    localStorage.setItem("faultline-session", id);
+  }
+  return id;
 }
 
-// Fetch the bottom status bar metrics on load
-// I'm hitting two endpoints in parallel and combining them
-async function fetchStatusMetrics(): Promise<StatusMetrics> {
+// Pull status bar metrics on load — two Radar endpoints in parallel
+// Falls back gracefully if either fails (e.g. token not set yet)
+async function fetchStatusMetrics() {
   try {
-    const [routeStatsRes, outagesRes] = await Promise.allSettled([
-      fetch("/api/chat/status/route-stats?format=json"),
-      fetch("/api/chat/status/outages?format=json"),
+    const [routeRes, outageRes] = await Promise.allSettled([
+      fetch("/api/radar/route-stats"),
+      fetch("/api/radar/outages"),
     ]);
 
-    // These will fail unless I wire up proxy endpoints, so I'll show
-    // live data only if they succeed, otherwise show a friendly fallback
     let totalRoutes = "—";
     let activeOutages = "—";
 
-    if (routeStatsRes.status === "fulfilled" && routeStatsRes.value.ok) {
-      const data = await routeStatsRes.value.json() as { result?: { meta?: { totalIPv4RoutesAdvertised?: number } } };
+    if (routeRes.status === "fulfilled" && routeRes.value.ok) {
+      const d = (await routeRes.value.json()) as {
+        result?: { meta?: { totalIPv4RoutesAdvertised?: number } };
+      };
       totalRoutes =
-        data?.result?.meta?.totalIPv4RoutesAdvertised?.toLocaleString() ?? "—";
+        d?.result?.meta?.totalIPv4RoutesAdvertised?.toLocaleString() ?? "—";
     }
-
-    if (outagesRes.status === "fulfilled" && outagesRes.value.ok) {
-      const data = await outagesRes.value.json() as { result?: { annotations?: { outages?: unknown[] } } };
-      activeOutages =
-        String(data?.result?.annotations?.outages?.length ?? "—");
+    if (outageRes.status === "fulfilled" && outageRes.value.ok) {
+      const d = (await outageRes.value.json()) as {
+        result?: { annotations?: { outages?: unknown[] } };
+      };
+      activeOutages = String(
+        d?.result?.annotations?.outages?.length ?? "—"
+      );
     }
 
     return {
       totalRoutes,
       activeOutages,
       lastUpdated: new Date().toLocaleTimeString(),
-      loaded: true,
     };
   } catch {
     return {
       totalRoutes: "—",
       activeOutages: "—",
       lastUpdated: new Date().toLocaleTimeString(),
-      loaded: true,
     };
   }
-}
-
-// Generate a session ID that persists in localStorage
-// Each browser tab gets its own isolated chat history via DO
-function getSessionId(): string {
-  let id = localStorage.getItem("faultline-session");
-  if (!id) {
-    id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    localStorage.setItem("faultline-session", id);
-  }
-  return id;
 }
 
 export function App() {
   const sessionId = useRef(getSessionId());
   const [input, setInput] = useState("");
-  const [isConnected, setIsConnected] = useState(false);
-  const [activeTools, setActiveTools] = useState<Set<string>>(new Set());
-  const [metrics, setMetrics] = useState<StatusMetrics>({
+  const [metrics, setMetrics] = useState({
     totalRoutes: "—",
     activeOutages: "—",
     lastUpdated: "—",
@@ -95,147 +86,124 @@ export function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // useAgentChat handles WebSocket connection to the DO, message streaming,
-  // and conversation history — I don't have to manage any of that myself
-  const { messages, sendMessage, isLoading } = useAgentChat({
-    agent: `/api/chat/${sessionId.current}`,
-    onMessage: () => {
-      setIsConnected(true);
-    },
-    onToolCall: (toolCall: { toolName: string }) => {
-      // Show which Radar endpoint is being queried
-      setActiveTools((prev) => new Set([...prev, toolCall.toolName]));
-    },
-    onToolResult: (toolResult: { toolCallId: string; toolName: string }) => {
-      // Remove the tool from active set when it finishes
-      setActiveTools((prev) => {
-        const next = new Set(prev);
-        next.delete(toolResult.toolName);
-        return next;
-      });
-    },
+  // useAgent opens a WebSocket to /agents/ChatAgent/{sessionId} on the Worker.
+  // routeAgentRequest on the server side routes it to the right DO instance.
+  const agent = useAgent({
+    agent: "ChatAgent",
+    name: sessionId.current,
   });
 
-  // Load status bar metrics on mount
+  // useAgentChat wraps AI SDK v6's useChat with the agent WebSocket transport.
+  // messages, status, sendMessage are the main things I use from this.
+  const { messages, sendMessage, status } = useAgentChat({ agent });
+
+  const isLoading = status === "submitted" || status === "streaming";
+
+  // Derive active tools from message parts — look for tool parts that are
+  // still waiting on input or output (not yet 'output-available')
+  const activeTools = React.useMemo(() => {
+    const active = new Set<string>();
+    if (!isLoading) return active;
+    for (const msg of messages) {
+      if (msg.role !== "assistant") continue;
+      for (const part of msg.parts) {
+        const type = (part as { type: string }).type;
+        if (type === "dynamic-tool" || type.startsWith("tool-")) {
+          const p = part as {
+            type: string;
+            toolName?: string;
+            state?: string;
+          };
+          const toolName = p.toolName ?? type.replace(/^tool-/, "");
+          const state = p.state ?? "";
+          if (
+            state === "input-streaming" ||
+            state === "input-available"
+          ) {
+            active.add(toolName);
+          }
+        }
+      }
+    }
+    return active;
+  }, [messages, isLoading]);
+
   useEffect(() => {
-    fetchStatusMetrics().then(setMetrics);
-    // Mark as connected after a tick — WebSocket handshake is async
-    const t = setTimeout(() => setIsConnected(true), 800);
-    return () => clearTimeout(t);
+    fetchStatusMetrics().then((m) => setMetrics({ ...m, loaded: true }));
   }, []);
 
-  // Scroll to bottom whenever messages update
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
   const handleSend = useCallback(() => {
-    const trimmed = input.trim();
-    if (!trimmed || isLoading) return;
-    sendMessage(trimmed);
+    const text = input.trim();
+    if (!text || isLoading) return;
+    sendMessage({ text });
     setInput("");
+    // Reset textarea height
+    if (inputRef.current) inputRef.current.style.height = "auto";
   }, [input, isLoading, sendMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Send on Enter, newline on Shift+Enter
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
   };
 
-  const handleSuggestedQuery = (query: string) => {
-    sendMessage(query);
-  };
-
-  // Auto-resize textarea as user types
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
     e.target.style.height = "auto";
     e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
   };
 
+  const isConnected = status !== "error";
+
   return (
     <div className="app">
-      {/* Subtle grid background — gives it that Cloudflare dashboard feel */}
       <div className="grid-bg" aria-hidden="true" />
 
       <div className="container">
-        {/* Header */}
+        {/* ── Header ─────────────────────────────────────── */}
         <header className="header">
-          <div className="header-left">
-            <div className="logo">
-              <svg
-                className="logo-icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-                aria-hidden="true"
-              >
-                {/* Radar/pulse icon — felt right for an internet monitoring tool */}
-                <circle
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="#f6821f"
-                  strokeWidth="1.5"
-                  strokeDasharray="2 3"
-                />
-                <circle
-                  cx="12"
-                  cy="12"
-                  r="6"
-                  stroke="#f6821f"
-                  strokeWidth="1.5"
-                  opacity="0.6"
-                />
-                <circle cx="12" cy="12" r="2.5" fill="#f6821f" />
-                <path
-                  d="M12 12 L18 6"
-                  stroke="#f6821f"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                />
-              </svg>
-              <div>
-                <h1 className="logo-title">
-                  Fault<span className="logo-accent">line</span>
-                </h1>
-                <p className="logo-sub">
-                  Powered by Cloudflare Radar + Workers AI
-                </p>
-              </div>
+          <div className="logo">
+            <svg className="logo-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" stroke="#f6821f" strokeWidth="1.5" strokeDasharray="2 3" />
+              <circle cx="12" cy="12" r="6" stroke="#f6821f" strokeWidth="1.5" opacity="0.5" />
+              <circle cx="12" cy="12" r="2.5" fill="#f6821f" />
+              <path d="M12 12 L18 6" stroke="#f6821f" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+            <div>
+              <h1 className="logo-title">
+                Fault<span className="logo-accent">line</span>
+              </h1>
+              <p className="logo-sub">Powered by Cloudflare Radar + Workers AI</p>
             </div>
           </div>
 
-          <div className="header-right">
-            <div className={`status-badge ${isConnected ? "connected" : "connecting"}`}>
-              <span className="status-dot" />
-              <span>{isConnected ? "Live" : "Connecting..."}</span>
-            </div>
+          <div className={`status-badge ${isConnected ? "connected" : "connecting"}`}>
+            <span className="status-dot" />
+            <span>{isConnected ? "Live" : "Connecting..."}</span>
           </div>
         </header>
 
-        {/* Tool call indicator — shows which Radar endpoint is being queried */}
+        {/* ── Tool call indicator ─────────────────────────── */}
         {activeTools.size > 0 && (
           <div className="tool-indicator">
             <div className="tool-pulse" aria-hidden="true" />
             <span>
-              {[...activeTools]
-                .map((t) => TOOL_LABELS[t] ?? t)
-                .join(" · ")}
-              {"..."}
+              {[...activeTools].map((t) => TOOL_LABELS[t] ?? t).join(" · ")}...
             </span>
           </div>
         )}
 
-        {/* Chat messages area */}
+        {/* ── Chat area ───────────────────────────────────── */}
         <main className="chat-area">
           {messages.length === 0 && !isLoading ? (
-            /* Empty state — show suggested queries */
             <div className="empty-state">
               <div className="empty-icon" aria-hidden="true">
-                <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <svg viewBox="0 0 64 64" fill="none">
                   <circle cx="32" cy="32" r="30" stroke="#1d1d1d" strokeWidth="2" />
                   <circle cx="32" cy="32" r="20" stroke="#1d1d1d" strokeWidth="2" />
                   <circle cx="32" cy="32" r="10" stroke="#f6821f" strokeWidth="2" opacity="0.5" />
@@ -247,15 +215,16 @@ export function App() {
               </div>
               <h2 className="empty-title">Find where the internet breaks</h2>
               <p className="empty-sub">
-                Ask me about outages, BGP hijacks, route leaks, or traffic anomalies.
-                I pull live data from Cloudflare Radar and explain it in plain English.
+                Ask me about outages, BGP hijacks, route leaks, or traffic
+                anomalies. I pull live data from Cloudflare Radar and explain
+                it in plain English.
               </p>
               <div className="suggestions">
                 {SUGGESTED_QUERIES.map((q) => (
                   <button
                     key={q}
                     className="suggestion-chip"
-                    onClick={() => handleSuggestedQuery(q)}
+                    onClick={() => sendMessage({ text: q })}
                   >
                     {q}
                   </button>
@@ -263,7 +232,6 @@ export function App() {
               </div>
             </div>
           ) : (
-            /* Message list */
             <div className="messages">
               {messages.map((msg) => (
                 <div
@@ -271,7 +239,7 @@ export function App() {
                   className={`message ${msg.role === "user" ? "message-user" : "message-agent"}`}
                 >
                   {msg.role === "assistant" && (
-                    <div className="agent-label" aria-label="Faultline agent">
+                    <div className="agent-label">
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                         <circle cx="12" cy="12" r="10" stroke="#f6821f" strokeWidth="2" strokeDasharray="2 3" />
                         <circle cx="12" cy="12" r="2.5" fill="#f6821f" />
@@ -280,13 +248,12 @@ export function App() {
                     </div>
                   )}
                   <div className="message-bubble">
-                    {/* Render newlines and basic markdown-ish formatting */}
-                    {renderMessageContent(msg.content)}
+                    {renderParts(msg.parts as MessagePart[])}
                   </div>
                 </div>
               ))}
 
-              {/* Typing / streaming indicator */}
+              {/* Blinking cursor while streaming but no tool is active */}
               {isLoading && activeTools.size === 0 && (
                 <div className="message message-agent">
                   <div className="agent-label">
@@ -297,7 +264,7 @@ export function App() {
                     <span>Faultline</span>
                   </div>
                   <div className="message-bubble">
-                    <span className="typing-cursor" aria-label="Loading response" />
+                    <span className="typing-cursor" aria-label="Loading" />
                   </div>
                 </div>
               )}
@@ -307,7 +274,7 @@ export function App() {
           )}
         </main>
 
-        {/* Input area */}
+        {/* ── Input ───────────────────────────────────────── */}
         <footer className="input-area">
           <div className="input-wrapper">
             <textarea
@@ -319,29 +286,16 @@ export function App() {
               onKeyDown={handleKeyDown}
               rows={1}
               aria-label="Chat message input"
-              disabled={!isConnected}
             />
             <button
               className="send-btn"
               onClick={handleSend}
-              disabled={!input.trim() || isLoading || !isConnected}
+              disabled={!input.trim() || isLoading}
               aria-label="Send message"
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path
-                  d="M22 2L11 13"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M22 2L15 22L11 13L2 9L22 2Z"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
+                <path d="M22 2L11 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </button>
           </div>
@@ -350,7 +304,7 @@ export function App() {
           </p>
         </footer>
 
-        {/* Status bar — live metrics at the bottom */}
+        {/* ── Status bar ──────────────────────────────────── */}
         <div className="status-bar">
           <div className="metric-card">
             <span className="metric-label">Global BGP Routes</span>
@@ -378,60 +332,94 @@ export function App() {
   );
 }
 
-// Render message content — handles bullet points, bold text, and newlines
-// I'm keeping this simple instead of pulling in a full markdown library
-function renderMessageContent(content: string): React.ReactNode {
-  const lines = content.split("\n");
+// ── Message rendering ──────────────────────────────────────────────────────
 
-  return (
-    <>
-      {lines.map((line, i) => {
-        // Bullet points
-        if (line.startsWith("- ") || line.startsWith("• ")) {
-          return (
-            <div key={i} className="msg-bullet">
-              <span className="bullet-dot" aria-hidden="true">▸</span>
-              <span>{renderInlineMarkdown(line.slice(2))}</span>
-            </div>
-          );
-        }
-        // Numbered list
-        if (/^\d+\.\s/.test(line)) {
-          return (
-            <div key={i} className="msg-bullet">
-              <span className="bullet-dot" aria-hidden="true">{line.match(/^\d+/)?.[0]}.</span>
-              <span>{renderInlineMarkdown(line.replace(/^\d+\.\s/, ""))}</span>
-            </div>
-          );
-        }
-        // Headings (##)
-        if (line.startsWith("## ")) {
-          return (
-            <p key={i} className="msg-heading">
-              {line.slice(3)}
-            </p>
-          );
-        }
-        // Empty line = visual spacer
-        if (line.trim() === "") {
-          return <div key={i} className="msg-spacer" />;
-        }
-        return <p key={i}>{renderInlineMarkdown(line)}</p>;
-      })}
-    </>
-  );
+type MessagePart =
+  | { type: "text"; text: string }
+  | { type: "step-start" }
+  | { type: "reasoning"; reasoning: string }
+  | { type: string; toolName?: string; state?: string; toolCallId?: string };
+
+// Render all parts of a message — text gets formatted, tool calls get a
+// subtle "used tool X" badge so the user can see what data was fetched
+function renderParts(parts: MessagePart[]): React.ReactNode {
+  return parts.map((part, i) => {
+    if (part.type === "text") {
+      return (
+        <div key={i} className="part-text">
+          {renderFormattedText((part as { type: "text"; text: string }).text)}
+        </div>
+      );
+    }
+
+    if (part.type === "step-start") {
+      return null; // internal SDK part, nothing to show
+    }
+
+    if (part.type === "reasoning") {
+      return null; // skip reasoning traces in the UI
+    }
+
+    // Any tool part (dynamic-tool or tool-{name}) that completed
+    if (
+      part.type === "dynamic-tool" ||
+      part.type.startsWith("tool-")
+    ) {
+      const p = part as { type: string; toolName?: string; state?: string };
+      const name = p.toolName ?? part.type.replace(/^tool-/, "");
+      const state = p.state ?? "";
+      if (state === "output-available") {
+        return (
+          <div key={i} className="tool-badge">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M20 6L9 17L4 12" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span>{TOOL_LABELS[name] ?? name}</span>
+          </div>
+        );
+      }
+      return null;
+    }
+
+    return null;
+  });
 }
 
-// Handle **bold** and `code` inline
-function renderInlineMarkdown(text: string): React.ReactNode {
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
-  return parts.map((part, i) => {
-    if (part.startsWith("**") && part.endsWith("**")) {
+// Simple text formatter — handles bullet points, bold, inline code,
+// headings, numbered lists. No markdown library needed for this.
+function renderFormattedText(text: string): React.ReactNode {
+  const lines = text.split("\n");
+  return lines.map((line, i) => {
+    if (line.startsWith("- ") || line.startsWith("• ")) {
+      return (
+        <div key={i} className="msg-bullet">
+          <span className="bullet-dot" aria-hidden="true">▸</span>
+          <span>{renderInline(line.slice(2))}</span>
+        </div>
+      );
+    }
+    if (/^\d+\.\s/.test(line)) {
+      return (
+        <div key={i} className="msg-bullet">
+          <span className="bullet-dot" aria-hidden="true">{line.match(/^\d+/)?.[0]}.</span>
+          <span>{renderInline(line.replace(/^\d+\.\s/, ""))}</span>
+        </div>
+      );
+    }
+    if (line.startsWith("## ") || line.startsWith("### ")) {
+      return <p key={i} className="msg-heading">{line.replace(/^#{2,3}\s/, "")}</p>;
+    }
+    if (line.trim() === "") return <div key={i} className="msg-spacer" />;
+    return <p key={i}>{renderInline(line)}</p>;
+  });
+}
+
+function renderInline(text: string): React.ReactNode {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**"))
       return <strong key={i}>{part.slice(2, -2)}</strong>;
-    }
-    if (part.startsWith("`") && part.endsWith("`")) {
+    if (part.startsWith("`") && part.endsWith("`"))
       return <code key={i} className="inline-code">{part.slice(1, -1)}</code>;
-    }
     return part;
   });
 }

@@ -1,25 +1,33 @@
-// I'm extending AIChatAgent from the Cloudflare Agents SDK — this handles
-// WebSocket connections, message persistence via Durable Objects SQL, and
-// streaming all out of the box. Way cleaner than rolling my own DO class.
+// I'm extending AIChatAgent from @cloudflare/ai-chat — this is the new home
+// after they split the agents SDK in Feb 2026. Handles WebSocket, SQLite
+// message persistence, and streaming all automatically via Durable Objects.
 
-import { AIChatAgent } from "@cloudflare/agents";
-import { createDataStreamResponse, streamText, tool } from "ai";
-import { createWorkersAI } from "@ai-sdk/cloudflare";
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { routeAgentRequest } from "agents";
+import { createWorkersAI } from "workers-ai-provider";
+import {
+  streamText,
+  convertToModelMessages,
+  pruneMessages,
+  tool,
+  stepCountIs,
+  type StreamTextOnFinishCallback,
+  type ToolSet,
+} from "ai";
 import { z } from "zod";
 
-// Env bindings defined in wrangler.toml
 export interface Env {
   AI: Ai;
-  CHAT_AGENT: DurableObjectNamespace;
+  // DO binding name must match wrangler.toml and the class name
+  ChatAgent: DurableObjectNamespace;
   CLOUDFLARE_RADAR_TOKEN: string;
   ASSETS: Fetcher;
 }
 
-// Base URL for all Cloudflare Radar API calls
 const RADAR_BASE = "https://api.cloudflare.com/client/v4";
 
-// Helper to hit Radar with auth + error handling
-// I don't want the whole thing to crash if Radar rate-limits me
+// Wraps every Radar call — handles auth, rate limits, and bad responses
+// without crashing the whole agent
 async function radarFetch(
   path: string,
   token: string,
@@ -30,7 +38,6 @@ async function radarFetch(
     if (params) {
       Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
     }
-    // Always ask for JSON format
     url.searchParams.set("format", "json");
 
     const res = await fetch(url.toString(), {
@@ -43,264 +50,184 @@ async function radarFetch(
     if (res.status === 429) {
       return { success: false, data: null, error: "rate_limited" };
     }
-
     if (!res.ok) {
-      return {
-        success: false,
-        data: null,
-        error: `HTTP ${res.status}: ${res.statusText}`,
-      };
+      return { success: false, data: null, error: `HTTP ${res.status}` };
     }
 
-    const json = await res.json();
-    return { success: true, data: json };
+    return { success: true, data: await res.json() };
   } catch (err) {
     return {
       success: false,
       data: null,
-      error: err instanceof Error ? err.message : "Unknown fetch error",
+      error: err instanceof Error ? err.message : "Unknown error",
     };
   }
 }
 
-// System prompt — tells Llama 3.3 to be a network analyst, not a chatbot
 const SYSTEM_PROMPT = `You are an internet intelligence analyst powered by Cloudflare Radar. You translate raw internet infrastructure data — BGP events, route leaks, traffic anomalies, outages — into clear, human-readable narratives.
 
 When you don't have data, say so honestly. Be concise, specific, and use plain English. Never use jargon without explaining it.
 
 When describing outages, always mention: what happened, where, when, and potential impact.
 
-You have access to live Cloudflare Radar data through your tools. Always call the relevant tool before answering questions about current internet conditions — don't make up numbers or events.
+Always call the relevant tool before answering questions about current internet conditions — don't make up numbers or events.
 
-Format your responses with:
+Format responses with:
 - A brief headline summary (1 sentence)
 - Key findings as bullet points
-- A plain-English explanation of what it means for regular internet users
+- A plain-English explanation of what it means for regular users
 
-If Radar data is temporarily unavailable, say exactly that and explain what the data would normally show.`;
+If Radar data is temporarily unavailable, say exactly that.`;
 
-// The main agent class — this is a Durable Object under the hood
-// Agents SDK stores conversation history in SQLite automatically
+// ChatAgent is a Durable Object — one instance per browser session.
+// The Agents SDK stores all messages in SQLite automatically; I don't
+// have to manage any of that state myself.
 export class ChatAgent extends AIChatAgent<Env> {
-  async onChatMessage(onChunk: (chunk: string) => void) {
-    // I'm using createWorkersAI so I get the Vercel AI SDK interface
-    // on top of Workers AI — means I can use streamText and tools the normal way
+  async onChatMessage(
+    onFinish: StreamTextOnFinishCallback<ToolSet>,
+  ) {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
-    const model = workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
-
-    const response = createDataStreamResponse({
-      execute: async (dataStream) => {
-        const result = streamText({
-          model,
-          system: SYSTEM_PROMPT,
-          messages: this.messages,
-          maxSteps: 5, // let it chain tool calls if needed
-          tools: {
-            // Tool 1: current outages and anomalies worldwide
-            getCurrentOutages: tool({
-              description:
-                "Get the latest internet outages and anomalies from Cloudflare Radar. Use this when asked about current outages, what's broken, or general internet health.",
-              parameters: z.object({
-                limit: z
-                  .number()
-                  .optional()
-                  .default(10)
-                  .describe("Number of outage events to retrieve"),
-              }),
-              execute: async ({ limit }) => {
-                const result = await radarFetch(
-                  "/radar/annotations/outages",
-                  this.env.CLOUDFLARE_RADAR_TOKEN,
-                  { limit: String(limit) }
-                );
-
-                if (!result.success) {
-                  return {
-                    error: "Radar data temporarily unavailable",
-                    detail: result.error,
-                  };
-                }
-
-                return result.data;
-              },
-            }),
-
-            // Tool 2: BGP hijack events — these are when someone wrongly announces
-            // another network's IP prefixes, basically "stealing" their traffic
-            getBGPHijacks: tool({
-              description:
-                "Get BGP hijack events from Cloudflare Radar. BGP hijacks are when a network incorrectly claims ownership of IP address ranges, potentially redirecting or intercepting traffic. Use when asked about BGP hijacks, route hijacking, or traffic interception.",
-              parameters: z.object({
-                limit: z
-                  .number()
-                  .optional()
-                  .default(10)
-                  .describe("Number of hijack events to return"),
-                minConfidence: z
-                  .number()
-                  .optional()
-                  .default(0.8)
-                  .describe(
-                    "Minimum confidence score (0-1) for hijack detection"
-                  ),
-              }),
-              execute: async ({ limit, minConfidence }) => {
-                const result = await radarFetch(
-                  "/radar/bgp/hijacks/events",
-                  this.env.CLOUDFLARE_RADAR_TOKEN,
-                  {
-                    limit: String(limit),
-                    minConfidence: String(minConfidence),
-                  }
-                );
-
-                if (!result.success) {
-                  return {
-                    error: "Radar data temporarily unavailable",
-                    detail: result.error,
-                  };
-                }
-
-                return result.data;
-              },
-            }),
-
-            // Tool 3: BGP route leaks — different from hijacks, these are when
-            // routing announcements get sent somewhere they shouldn't propagate
-            getRouteLeaks: tool({
-              description:
-                "Get BGP route leak events. Route leaks happen when routing announcements propagate beyond their intended scope, potentially causing traffic to take suboptimal or unintended paths. Use when asked about route leaks, BGP leaks, or routing anomalies.",
-              parameters: z.object({
-                limit: z
-                  .number()
-                  .optional()
-                  .default(10)
-                  .describe("Number of route leak events to return"),
-              }),
-              execute: async ({ limit }) => {
-                const result = await radarFetch(
-                  "/radar/bgp/leaks/events",
-                  this.env.CLOUDFLARE_RADAR_TOKEN,
-                  { limit: String(limit) }
-                );
-
-                if (!result.success) {
-                  return {
-                    error: "Radar data temporarily unavailable",
-                    detail: result.error,
-                  };
-                }
-
-                return result.data;
-              },
-            }),
-
-            // Tool 4: Traffic anomalies for a specific region/location
-            getTrafficAnomalies: tool({
-              description:
-                "Get internet traffic anomalies for a specific location or region. Use when asked about traffic patterns, internet disruptions in a specific country or region, or unusual traffic behavior.",
-              parameters: z.object({
-                location: z
-                  .string()
-                  .optional()
-                  .describe(
-                    "ISO country code (e.g. 'US', 'CN', 'DE') or region name"
-                  ),
-                limit: z
-                  .number()
-                  .optional()
-                  .default(10)
-                  .describe("Number of anomaly events to return"),
-              }),
-              execute: async ({ location, limit }) => {
-                const params: Record<string, string> = {
-                  limit: String(limit),
-                };
-                if (location) {
-                  params.location = location;
-                }
-
-                const result = await radarFetch(
-                  "/radar/annotations/outages",
-                  this.env.CLOUDFLARE_RADAR_TOKEN,
-                  params
-                );
-
-                if (!result.success) {
-                  return {
-                    error: "Radar data temporarily unavailable",
-                    detail: result.error,
-                  };
-                }
-
-                return result.data;
-              },
-            }),
-
-            // Tool 5: Global routing table health — number of prefixes, ASNs, etc.
-            // I use this as a proxy for overall internet "health"
-            getInternetHealth: tool({
-              description:
-                "Get global BGP routing table statistics as a measure of internet health. Shows total number of routes, prefixes, and ASNs in the global routing table. Use when asked about overall internet health, routing stability, or global connectivity.",
-              parameters: z.object({}),
-              execute: async () => {
-                const result = await radarFetch(
-                  "/radar/bgp/route-stats",
-                  this.env.CLOUDFLARE_RADAR_TOKEN
-                );
-
-                if (!result.success) {
-                  return {
-                    error: "Radar data temporarily unavailable",
-                    detail: result.error,
-                  };
-                }
-
-                return result.data;
-              },
-            }),
-          },
-          onChunk(event) {
-            // Forward each streamed chunk to the client
-            dataStream.writeData(event.chunk);
-          },
-          onFinish: async ({ usage }) => {
-            console.log(
-              `[faultline] Finished — tokens used: ${JSON.stringify(usage)}`
+    const result = streamText({
+      model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+      system: SYSTEM_PROMPT,
+      // convertToModelMessages turns UIMessages → CoreMessages for the model
+      // pruneMessages keeps old tool calls from clogging the context window
+      messages: pruneMessages({
+        messages: await convertToModelMessages(this.messages),
+        toolCalls: "before-last-2-messages",
+      }),
+      tools: {
+        // Tool 1: current outages worldwide
+        getCurrentOutages: tool({
+          description:
+            "Get the latest internet outages and anomalies from Cloudflare Radar. Use when asked about current outages, what's broken, or general internet health.",
+          inputSchema: z.object({
+            limit: z
+              .number()
+              .optional()
+              .default(10)
+              .describe("Number of outage events to retrieve"),
+          }),
+          execute: async ({ limit }) => {
+            const r = await radarFetch(
+              "/radar/annotations/outages",
+              this.env.CLOUDFLARE_RADAR_TOKEN,
+              { limit: String(limit) }
             );
+            return r.success
+              ? r.data
+              : { error: "Radar data temporarily unavailable", detail: r.error };
           },
-        });
+        }),
 
-        result.mergeIntoDataStream(dataStream);
+        // Tool 2: BGP hijacks — someone claiming IP space that isn't theirs
+        getBGPHijacks: tool({
+          description:
+            "Get BGP hijack events. BGP hijacks happen when a network incorrectly claims ownership of IP address ranges, potentially redirecting or intercepting traffic. Use when asked about BGP hijacks, route hijacking, or traffic interception.",
+          inputSchema: z.object({
+            limit: z
+              .number()
+              .optional()
+              .default(10)
+              .describe("Number of hijack events to return"),
+            minConfidence: z
+              .number()
+              .optional()
+              .default(0.8)
+              .describe("Minimum confidence score (0-1) for hijack detection"),
+          }),
+          execute: async ({ limit, minConfidence }) => {
+            const r = await radarFetch(
+              "/radar/bgp/hijacks/events",
+              this.env.CLOUDFLARE_RADAR_TOKEN,
+              { limit: String(limit), minConfidence: String(minConfidence) }
+            );
+            return r.success
+              ? r.data
+              : { error: "Radar data temporarily unavailable", detail: r.error };
+          },
+        }),
+
+        // Tool 3: route leaks — routing announcements that propagate too far
+        getRouteLeaks: tool({
+          description:
+            "Get BGP route leak events. Route leaks happen when routing announcements propagate beyond their intended scope. Use when asked about route leaks, BGP leaks, or routing anomalies.",
+          inputSchema: z.object({
+            limit: z
+              .number()
+              .optional()
+              .default(10)
+              .describe("Number of route leak events to return"),
+          }),
+          execute: async ({ limit }) => {
+            const r = await radarFetch(
+              "/radar/bgp/leaks/events",
+              this.env.CLOUDFLARE_RADAR_TOKEN,
+              { limit: String(limit) }
+            );
+            return r.success
+              ? r.data
+              : { error: "Radar data temporarily unavailable", detail: r.error };
+          },
+        }),
+
+        // Tool 4: regional traffic anomalies — optionally filter by country
+        getTrafficAnomalies: tool({
+          description:
+            "Get internet traffic anomalies for a specific location or region. Use when asked about traffic patterns or disruptions in a specific country or region.",
+          inputSchema: z.object({
+            location: z
+              .string()
+              .optional()
+              .describe("ISO country code (e.g. 'US', 'CN', 'DE') or region"),
+            limit: z.number().optional().default(10),
+          }),
+          execute: async ({ location, limit }) => {
+            const params: Record<string, string> = { limit: String(limit) };
+            if (location) params.location = location;
+            const r = await radarFetch(
+              "/radar/annotations/outages",
+              this.env.CLOUDFLARE_RADAR_TOKEN,
+              params
+            );
+            return r.success
+              ? r.data
+              : { error: "Radar data temporarily unavailable", detail: r.error };
+          },
+        }),
+
+        // Tool 5: global routing table stats — proxy for overall internet health
+        getInternetHealth: tool({
+          description:
+            "Get global BGP routing table statistics as a measure of internet health. Shows total routes, prefixes, and ASNs. Use when asked about overall internet health or routing stability.",
+          inputSchema: z.object({}),
+          execute: async () => {
+            const r = await radarFetch(
+              "/radar/bgp/route-stats",
+              this.env.CLOUDFLARE_RADAR_TOKEN
+            );
+            return r.success
+              ? r.data
+              : { error: "Radar data temporarily unavailable", detail: r.error };
+          },
+        }),
       },
-      onError: (err) => {
-        console.error("[faultline] Stream error:", err);
-        return err instanceof Error ? err.message : "Something went wrong";
-      },
+      stopWhen: stepCountIs(5),
+      onFinish,
     });
 
-    return response;
+    return result.toUIMessageStreamResponse();
   }
 }
 
-// Main Worker fetch handler — routes WebSocket upgrades to the DO,
-// serves the frontend assets for everything else
+// routeAgentRequest handles /agents/ChatAgent/:id → DO routing automatically.
+// Anything else gets served from Workers Assets (the built React frontend).
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    // Route /api/chat/* to the ChatAgent Durable Object
-    // The Agents SDK expects requests at this path pattern
-    if (url.pathname.startsWith("/api/chat")) {
-      // Session ID comes from the URL — each unique ID = isolated chat history
-      const sessionId = url.pathname.split("/")[3] ?? "default";
-      const id = env.CHAT_AGENT.idFromName(sessionId);
-      const stub = env.CHAT_AGENT.get(id);
-      return stub.fetch(request);
-    }
-
-    // Serve static frontend assets (built React app)
-    return env.ASSETS.fetch(request);
+    return (
+      (await routeAgentRequest(request, env)) ??
+      env.ASSETS.fetch(request)
+    );
   },
-};
+} satisfies ExportedHandler<Env>;
