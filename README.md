@@ -1,10 +1,16 @@
 # cf_ai_faultline — AI-Powered Internet Outage Storyteller
 
+## 🚀 Try it now → [faultline.kartikchoudhary085.workers.dev](https://faultline.kartikchoudhary085.workers.dev)
+> No sign-up required. Works instantly. Ask about any internet outage, BGP hijack, or route leak.
+
+---
+
 > **Find where the internet breaks.**
 
 Faultline is a conversational AI agent that answers plain-English questions about internet health in real time. Ask it about outages, BGP hijacks, route leaks, or traffic anomalies — it pulls live data from Cloudflare Radar, feeds it to Llama 3.3 running on Workers AI, and streams back clear human-readable narratives.
 
-**Live demo:** https://faultline.kartikchoudhary085.workers.dev
+**🔴 Live demo:** **[faultline.kartikchoudhary085.workers.dev](https://faultline.kartikchoudhary085.workers.dev)**
+> No sign-up. No API key. Open and ask anything.
 
 ---
 
