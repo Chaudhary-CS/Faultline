@@ -99,34 +99,13 @@ export function App() {
 
   const isLoading = status === "submitted" || status === "streaming";
 
-  // Derive active tools from message parts — look for tool parts that are
-  // still waiting on input or output (not yet 'output-available')
+  // Show "Querying Radar..." while the agent is loading — the pre-fetch
+  // happens server-side before streaming starts, so we just show it while
+  // the response is in the submitted/streaming state
   const activeTools = React.useMemo(() => {
-    const active = new Set<string>();
-    if (!isLoading) return active;
-    for (const msg of messages) {
-      if (msg.role !== "assistant") continue;
-      for (const part of msg.parts) {
-        const type = (part as { type: string }).type;
-        if (type === "dynamic-tool" || type.startsWith("tool-")) {
-          const p = part as {
-            type: string;
-            toolName?: string;
-            state?: string;
-          };
-          const toolName = p.toolName ?? type.replace(/^tool-/, "");
-          const state = p.state ?? "";
-          if (
-            state === "input-streaming" ||
-            state === "input-available"
-          ) {
-            active.add(toolName);
-          }
-        }
-      }
-    }
-    return active;
-  }, [messages, isLoading]);
+    if (!isLoading) return new Set<string>();
+    return new Set(["radar"]);
+  }, [isLoading]);
 
   useEffect(() => {
     fetchStatusMetrics().then((m) => setMetrics({ ...m, loaded: true }));
@@ -192,9 +171,7 @@ export function App() {
         {activeTools.size > 0 && (
           <div className="tool-indicator">
             <div className="tool-pulse" aria-hidden="true" />
-            <span>
-              {[...activeTools].map((t) => TOOL_LABELS[t] ?? t).join(" · ")}...
-            </span>
+            <span>Querying Cloudflare Radar...</span>
           </div>
         )}
 
