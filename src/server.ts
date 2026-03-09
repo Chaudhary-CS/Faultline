@@ -131,8 +131,8 @@ async function fetchRadarContext(
   ) {
     fetches.push({
       label: "Global BGP Routing Table Stats",
-      path: "/radar/bgp/route-stats",
-      params: { dateRange: "1d" },
+      path: "/radar/bgp/routes/stats",
+      params: {},
     });
   }
 
@@ -511,7 +511,8 @@ export default {
     // /api/stats — live status bar
     if (url.pathname === "/api/stats") {
       const [routeRes, outageRes] = await Promise.allSettled([
-        radarFetch("/radar/bgp/route-stats", env.CLOUDFLARE_RADAR_TOKEN, { dateRange: "1d" }),
+        // Correct endpoint: /radar/bgp/routes/stats (not /radar/bgp/route-stats)
+        radarFetch("/radar/bgp/routes/stats", env.CLOUDFLARE_RADAR_TOKEN, {}),
         radarFetch("/radar/annotations/outages", env.CLOUDFLARE_RADAR_TOKEN, { limit: "50", dateRange: "7d" }),
       ]);
 
@@ -519,13 +520,15 @@ export default {
       let outageCount = 0;
 
       if (routeRes.status === "fulfilled") {
-        const d = routeRes.value as { result?: { stats?: { totalRoutes?: number }; meta?: { totalIPv4RoutesAdvertised?: number } } };
-        routes = d?.result?.stats?.totalRoutes ?? d?.result?.meta?.totalIPv4RoutesAdvertised ?? 0;
+        // Actual field is routes_total (e.g. 1412848)
+        const d = routeRes.value as { result?: { stats?: { routes_total?: number } } };
+        routes = d?.result?.stats?.routes_total ?? 0;
       }
 
       if (outageRes.status === "fulfilled") {
-        const d = outageRes.value as { result?: { annotations?: { outages?: unknown[] } } };
-        outageCount = d?.result?.annotations?.outages?.length ?? 0;
+        // annotations is a flat array, not an object with outages key
+        const d = outageRes.value as { result?: { annotations?: unknown[] } };
+        outageCount = d?.result?.annotations?.length ?? 0;
       }
 
       return new Response(
@@ -588,7 +591,7 @@ export default {
 
     // Fetch overnight Radar data
     const [outages, hijacks, leaks] = await Promise.all([
-      radarFetch("/radar/annotations/outages", env.CLOUDFLARE_RADAR_TOKEN, { limit: "20", dateRange: "1d" }),
+      radarFetch("/radar/annotations/outages", env.CLOUDFLARE_RADAR_TOKEN, { limit: "20", dateRange: "7d" }),
       radarFetch("/radar/bgp/hijacks/events", env.CLOUDFLARE_RADAR_TOKEN, { per_page: "20", dateRange: "1d" }),
       radarFetch("/radar/bgp/leaks/events", env.CLOUDFLARE_RADAR_TOKEN, { per_page: "20", dateRange: "1d" }),
     ]);
